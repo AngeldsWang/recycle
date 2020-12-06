@@ -1,10 +1,16 @@
 # Recycle
 Recycle works like a `thrift store` polishing bytes to original shape.
 
+## Install
+
+``` shell
+go get -u github.com/angeldswang/recycle/cmd/recycle
+```
+
 ## Usage
 
 ``` shell
-→ ./recycle -h
+→ recycle -h
 Given the bytes encoded by thrift protocols and the target definition in thrift IDL,
 recycle can restore the data with specific type names instead of field numbers.
 
@@ -45,7 +51,7 @@ service UserService {
 Assume you captured the byte stream for a specific rpc request and dumped them with base64 encoded string, you can restore the `CreateUserRequest` with a readable json format.
 ``` shell
 $ echo 'gAEAAQAAAApDcmVhdGVVc2VyAAAAewwAAQwACg8AAQoAAAAACAACAAAAFwALAAEAAAAGdGhyaWZ0AAA=' \
-| ./recycle  -f ./example/user.thrift -t CreateUserRequest | jq
+| recycle  -f ./example/user.thrift -t CreateUserRequest | jq
 {
   "Name": "thrift",
   "Profile": {
