@@ -10,6 +10,9 @@ import (
 	"go.uber.org/thriftrw/compile"
 )
 
+type collectFunc func(ts compile.TypeSpec, paths []string)
+type polishFunc func(v interface{}, paths []string, curr map[string]interface{}) (string, []string, interface{})
+
 type Recycler struct {
 	thriftPath     string
 	targetName     string
@@ -39,117 +42,158 @@ func formatPath(paths []string) string {
 func (r *Recycler) collect(ts compile.TypeSpec, paths []string) {
 	switch vv := ts.(type) {
 	case *compile.StructSpec:
-		paths = append(paths, "struct")
-		r.typeNameByPath[formatPath(paths)] = vv.Name
-		for _, field := range vv.Fields {
-			if typeName(field.Type) != "struct" {
-				paths = append(paths, fmt.Sprintf("%d|%v", field.ID, typeName(field.Type)))
-			} else {
-				paths = append(paths, fmt.Sprintf("%d", field.ID))
-			}
-			r.typeNameByPath[formatPath(paths)] = field.Name
-			r.collect(field.Type, paths)
-			paths = paths[:len(paths)-1]
-		}
-		paths = paths[:len(paths)-1]
+		r.collectStruct(vv, paths, r.collect)
 	case *compile.MapSpec:
-		paths = append(paths, "key")
-		r.typeNameByPath[formatPath(paths)] = vv.KeySpec.ThriftName()
-		r.collect(vv.KeySpec, paths)
-		paths[len(paths)-1] = "value"
-		r.typeNameByPath[formatPath(paths)] = vv.ValueSpec.ThriftName()
-		r.collect(vv.ValueSpec, paths)
+		r.collectMapKey(vv.KeySpec, paths, r.collect)
+		r.collectMapValue(vv.ValueSpec, paths, r.collect)
 	case *compile.ListSpec:
-		paths = append(paths, "member")
-		r.typeNameByPath[formatPath(paths)] = vv.ValueSpec.ThriftName()
-		r.collect(vv.ValueSpec, paths)
-		paths = paths[:len(paths)-1]
+		r.collectList(vv, paths, r.collect)
 	case *compile.SetSpec:
-		paths = append(paths, "elem")
-		r.typeNameByPath[formatPath(paths)] = vv.ValueSpec.ThriftName()
-		r.collect(vv.ValueSpec, paths)
-		paths = paths[:len(paths)-1]
+		r.collectSet(vv, paths, r.collect)
 	case *compile.EnumSpec:
-		for _, item := range vv.Items {
-			paths = append(paths, fmt.Sprintf("value:%d", item.Value))
-			r.typeNameByPath[formatPath(paths)] = fmt.Sprintf("%s_%s", vv.Name, item.Name)
-			paths = paths[:len(paths)-1]
-		}
+		r.collectEnum(vv, paths, r.collect)
 	default:
 		return
 	}
 }
 
-func (r *Recycler) polish(v interface{}, paths []string, curr map[string]interface{}) (string, interface{}) {
+func (r *Recycler) collectStruct(v *compile.StructSpec, paths []string, cf collectFunc) []string {
+	paths = append(paths, "struct")
+	r.typeNameByPath[formatPath(paths)] = v.Name
+	for _, field := range v.Fields {
+		r.collectField(field, paths, r.collect)
+	}
+	paths = paths[:len(paths)-1]
+	return paths
+}
+
+func (r *Recycler) collectField(v *compile.FieldSpec, paths []string, cf collectFunc) []string {
+	var node string
+	if typeName(v.Type) != "struct" {
+		node = fmt.Sprintf("%d|%v", v.ID, typeName(v.Type))
+	} else {
+		node = fmt.Sprintf("%d", v.ID)
+	}
+	return r.collectType(v.Type, node, v.ThriftName(), paths, cf)
+}
+
+func (r *Recycler) collectMapKey(v compile.TypeSpec, paths []string, cf collectFunc) []string {
+	return r.collectType(v, "key", "", paths, cf)
+}
+
+func (r *Recycler) collectMapValue(v compile.TypeSpec, paths []string, cf collectFunc) []string {
+	return r.collectType(v, "value", "", paths, cf)
+}
+
+func (r *Recycler) collectList(v *compile.ListSpec, paths []string, cf collectFunc) []string {
+	return r.collectType(v.ValueSpec, "member", "", paths, cf)
+}
+
+func (r *Recycler) collectSet(v *compile.SetSpec, paths []string, cf collectFunc) []string {
+	return r.collectType(v.ValueSpec, "elem", "", paths, cf)
+}
+
+func (r *Recycler) collectType(v compile.TypeSpec, node, name string, paths []string, cf collectFunc) []string {
+	paths = append(paths, node)
+	if len(name) > 0 {
+		r.typeNameByPath[formatPath(paths)] = name
+	} else {
+		r.typeNameByPath[formatPath(paths)] = v.ThriftName()
+	}
+	cf(v, paths)
+	paths = paths[:len(paths)-1]
+	return paths
+}
+
+func (r *Recycler) collectEnum(v *compile.EnumSpec, paths []string, cf collectFunc) []string {
+	for _, item := range v.Items {
+		paths = append(paths, fmt.Sprintf("value:%d", item.Value))
+		r.typeNameByPath[formatPath(paths)] = fmt.Sprintf("%s_%s", v.ThriftName(), item.ThriftName())
+		paths = paths[:len(paths)-1]
+	}
+	return paths
+}
+
+func (r *Recycler) polish(v interface{}, paths []string, curr map[string]interface{}) (string, []string, interface{}) {
 	switch vv := v.(type) {
 	case general.Struct:
-		paths = append(paths, "struct")
-		path := formatPath(paths)
-		var ret interface{}
-		if typeName, ok := r.typeNameByPath[path]; ok {
-			curr[typeName] = make(map[string]interface{})
-			for id, field := range vv {
-				paths = append(paths, fmt.Sprintf("%d", id))
-				path, val := r.polish(field, paths, curr)
-				if name, ok := r.typeNameByPath[path]; ok {
-					curr[typeName].(map[string]interface{})[name] = val
-				}
-				paths = paths[:len(paths)-1]
-			}
-			ret = curr[typeName]
-		}
-		paths = paths[:len(paths)-1]
-		return path, ret
+		return r.polishStruct(vv, paths, curr, r.polish)
 	case general.Map:
-		paths = append(paths, "map")
-		path := formatPath(paths)
-		var ret interface{}
-		if typeName, ok := r.typeNameByPath[path]; ok {
-			curr[typeName] = make(map[interface{}]interface{})
-
-			for key, value := range vv {
-				paths = append(paths, "key")
-				path, val := r.polish(key, paths, curr)
-				if name, ok := r.typeNameByPath[path]; ok {
-					curr[typeName].(map[interface{}]interface{})[name] = val
-				}
-
-				paths[len(paths)-1] = "value"
-				path, val = r.polish(value, paths, curr)
-				if name, ok := r.typeNameByPath[path]; ok {
-					curr[typeName].(map[interface{}]interface{})[name] = val
-				}
-				paths = paths[:len(paths)-1]
-			}
-			ret = curr[typeName]
-		}
-		paths = paths[:len(paths)-1]
-		return path, ret
+		return r.polishMap(vv, paths, curr, r.polish)
 	case general.List:
-		paths = append(paths, "list")
-		path := formatPath(paths)
-		var ret interface{}
-		if typeName, ok := r.typeNameByPath[path]; ok {
-			curr[typeName] = make([]interface{}, len(vv))
-
-			for i := 0; i < len(vv); i++ {
-				paths = append(paths, "member")
-				path, val := r.polish(vv[i], paths, curr)
-				if _, ok := r.typeNameByPath[path]; ok {
-					curr[typeName].([]interface{})[i] = val
-				}
-				paths = paths[:len(paths)-1]
-			}
-			ret = curr[typeName]
-		}
-		paths = paths[:len(paths)-1]
-		return path, ret
+		return r.polishList(vv, paths, curr, r.polish)
 	default:
 		paths = append(paths, fmt.Sprintf("%v", reflect.TypeOf(v)))
 		path := formatPath(paths)
 		paths = paths[:len(paths)-1]
-		return path, vv
+		return path, paths, vv
 	}
+}
+
+func (r *Recycler) findNameByPath(path string) (name string, ok bool) {
+	name, ok = r.typeNameByPath[path]
+	return
+}
+
+func (r *Recycler) polishStruct(v general.Struct, paths []string, curr map[string]interface{}, pf polishFunc) (string, []string, interface{}) {
+	paths = append(paths, "struct")
+	path := formatPath(paths)
+	var ret interface{}
+	if typeName, ok := r.typeNameByPath[path]; ok {
+		curr[typeName] = NewRecycleType(v, 0)
+		for id, field := range v {
+			r.polishType(field, fmt.Sprintf("%d", id), typeName, -1, paths, curr, r.polish)
+		}
+		ret = curr[typeName]
+	}
+	paths = paths[:len(paths)-1]
+	return path, paths, ret
+}
+
+func (r *Recycler) polishMap(v general.Map, paths []string, curr map[string]interface{}, pf polishFunc) (string, []string, interface{}) {
+	paths = append(paths, "map")
+	path := formatPath(paths)
+	var ret interface{}
+	if typeName, ok := r.typeNameByPath[path]; ok {
+		curr[typeName] = NewRecycleType(v, 0)
+		for key, value := range v {
+			r.polishType(key, "key", typeName, -1, paths, curr, r.polish)
+			r.polishType(value, "value", typeName, -1, paths, curr, r.polish)
+		}
+		ret = curr[typeName]
+	}
+	paths = paths[:len(paths)-1]
+	return path, paths, ret
+}
+
+func (r *Recycler) polishList(v general.List, paths []string, curr map[string]interface{}, pf polishFunc) (string, []string, interface{}) {
+	paths = append(paths, "list")
+	path := formatPath(paths)
+	var ret interface{}
+	if typeName, ok := r.typeNameByPath[path]; ok {
+		curr[typeName] = NewRecycleType(v, len(v))
+		for i := 0; i < len(v); i++ {
+			r.polishType(v[i], "member", typeName, i, paths, curr, r.polish)
+		}
+		ret = curr[typeName]
+	}
+	paths = paths[:len(paths)-1]
+	return path, paths, ret
+}
+
+func (r *Recycler) polishType(v interface{}, node, typeName string, idx int, paths []string, curr map[string]interface{}, pf polishFunc) []string {
+	paths = append(paths, node)
+	path, _, val := pf(v, paths, curr)
+	name, ok := r.findNameByPath(path)
+	if ok {
+		if idx >= 0 {
+			curr[typeName].(recycleType).Set(idx, val)
+		} else {
+			curr[typeName].(recycleType).Set(name, val)
+		}
+	}
+	paths = paths[:len(paths)-1]
+	return paths
 }
 
 func Polish(thriftPath, targetName string, data []string) ([]interface{}, error) {
@@ -174,7 +218,7 @@ func Polish(thriftPath, targetName string, data []string) ([]interface{}, error)
 
 		curr := make(map[string]interface{})
 		paths := make([]string, 0)
-		_, shape := recycler.polish(raw, paths, curr)
+		_, _, shape := recycler.polish(raw, paths, curr)
 		shapes = append(shapes, shape)
 	}
 

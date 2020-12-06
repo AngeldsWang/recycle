@@ -44,7 +44,8 @@ service UserService {
 
 Assume you captured the byte stream for a specific rpc request and dumped them with base64 encoded string, you can restore the `CreateUserRequest` with a readable json format.
 ``` shell
-$ echo 'gAEAAQAAAApDcmVhdGVVc2VyAAAAewwAAQwACg8AAQoAAAAACAACAAAAFwALAAEAAAAGdGhyaWZ0AAA=' | ./recycle  -f ./example/user.thrift -t CreateUserRequest | jq
+$ echo 'gAEAAQAAAApDcmVhdGVVc2VyAAAAewwAAQwACg8AAQoAAAAACAACAAAAFwALAAEAAAAGdGhyaWZ0AAA=' \
+| ./recycle  -f ./example/user.thrift -t CreateUserRequest | jq
 {
   "Name": "thrift",
   "Profile": {
